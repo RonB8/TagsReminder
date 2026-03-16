@@ -6,45 +6,85 @@ import time
 import pywhatkit
 
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, simpledialog, messagebox
 import json
 import os
 import sys
+import re
 
 CONFIG_FILE = "config.json"
 
 
-def get_excel_file_path():
-    # Check if a file was already selected previously and saved in the config
+def setup_config():
+    """
+    Loads configuration from file. If missing, prompts the user for
+    the Excel file path and the daily run time, then saves them.
+    """
+    config = {}
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-                saved_path = config.get("excel_path")
-                # Ensure the file still exists at the saved path
-                if saved_path and os.path.exists(saved_path):
-                    return saved_path
         except Exception as e:
             print(f"Error reading config: {e}")
 
-    # If there is no config file or the file was deleted, prompt the user
+    update_config = False
+    saved_path = config.get("excel_path")
+    run_time = config.get("run_time")
+
+    # If both config values exist and the file is valid, return them immediately
+    if saved_path and os.path.exists(saved_path) and run_time:
+        return saved_path, run_time
+
+    # Otherwise, we need to prompt the user (requires tkinter root)
     root = tk.Tk()
     root.withdraw()  # Hide the main empty tkinter window
 
-    # Open the file selection dialog
-    file_path = filedialog.askopenfilename(
-        title="Select the Excel file for badge tracking",
-        filetypes=[("Excel files", "*.xlsx *.xls")]
-    )
+    # 1. Ask for Excel Path if missing or invalid
+    if not saved_path or not os.path.exists(saved_path):
+        saved_path = filedialog.askopenfilename(
+            title="Select the Excel file for badge tracking",
+            filetypes=[("Excel files", "*.xlsx *.xls")]
+        )
+        if saved_path:
+            config["excel_path"] = saved_path
+            update_config = True
+        else:
+            print("No Excel file selected. The program will exit.")
+            sys.exit()
 
-    if file_path:
-        # Save the selected path for future runs
+    # 2. Ask for Run Time if missing
+    if not run_time:
+        while True:
+            user_time = simpledialog.askstring(
+                title="Set Run Time",
+                prompt="Enter the daily run time (HH:MM format, e.g., 08:00):",
+                initialvalue="08:00"
+            )
+
+            if user_time is None:  # User clicked Cancel
+                print("No run time set. The program will exit.")
+                sys.exit()
+
+            user_time = user_time.strip()
+
+            # Validate time format using Regex (must be between 00:00 and 23:59)
+            if re.match(r"^([01]\d|2[0-3]):([0-5]\d)$", user_time):
+                config["run_time"] = user_time
+                run_time = user_time
+                update_config = True
+                break
+            else:
+                messagebox.showerror("Invalid Format", "Please enter the time in HH:MM format (e.g., 08:00 or 14:30).")
+
+    # Save the updated configuration
+    if update_config:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump({"excel_path": file_path}, f)
-        return file_path
-    else:
-        print("No Excel file selected. The program will exit.")
-        sys.exit()  # Terminate the script if no file is chosen
+            json.dump(config, f)
+
+    root.destroy()  # Clean up tk root
+    return saved_path, run_time
+
 
 class ExcelBadgeChecker:
     """
@@ -72,10 +112,10 @@ class ExcelBadgeChecker:
 
     def get_unreturned_yesterday(self):
         yesterday = datetime.now() - timedelta(days=1)
-        # Fix 1: Append the suffix to the end of the path to avoid invalid paths
+        # Append the suffix to the end of the path to avoid invalid paths
         temp_file_path = self.file_path + '.temp.xlsx'
         target_sheet = None
-        # Fix 3: Initialize df to None to prevent UnboundLocalError
+        # Initialize df to None to prevent UnboundLocalError
         df = None
 
         try:
@@ -107,7 +147,7 @@ class ExcelBadgeChecker:
                 try:
                     os.remove(temp_file_path)
                 except Exception as e:
-                    # Fix 2: Only print a warning, do not stop the function execution with a return statement
+                    # Only print a warning, do not stop the function execution with a return statement
                     print(f"Warning: Could not delete temporary file {temp_file_path}: {e}")
 
         # If df is somehow empty or not created, stop here
@@ -208,11 +248,13 @@ class WhatsAppNotifier:
             print(f"Failed to send WhatsApp to {phone}: {e}")
 
 
-def main_job():
+def main_job(excel_path):
     print(f"Starting scan... [{datetime.now().strftime('%d/%m/%Y %H:%M')}]")
 
-    excel_path = "tags.xlsx"
-    excel_path = get_excel_file_path()
+    # Safety check in case the file was deleted or moved while the script was running in the background
+    if not os.path.exists(excel_path):
+        print(f"Error: The Excel file at {excel_path} is missing!")
+        return
 
     checker = ExcelBadgeChecker(file_path=excel_path, date_formats=None)
     notifier = WhatsAppNotifier()
@@ -221,20 +263,21 @@ def main_job():
     notifier.send_notifications(unreturned)
 
 
-main_job()
-
-schedule.every().day.at("08:00").do(main_job)
-
 if __name__ == "__main__":
-    print("WhatsApp badge tracking system is running and waiting for 08:00...")
+    # 1. Load config and prompt user if this is the first run
+    target_excel_path, scheduled_time = setup_config()
+
+    # 2. Schedule the job using the user's selected time.
+    # We pass the excel_path as an argument to main_job.
+    schedule.every().day.at(scheduled_time).do(main_job, excel_path=target_excel_path)
+
+    print(f"WhatsApp badge tracking system is running and scheduled for {scheduled_time} every day...")
 
     # You MUST have WhatsApp Web logged in on your default browser for this to work!
-    # Uncomment to test immediately:
-    # main_job()
+    # Uncomment to test immediately without waiting for the scheduled time:
+    # main_job(target_excel_path)
 
-
-    exit(1)
-
+    # 3. Keep the script running
     while True:
         schedule.run_pending()
         time.sleep(60)
